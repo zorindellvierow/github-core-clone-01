@@ -328,7 +328,7 @@ function readBody(req: IncomingMessage): Promise<Buffer> {
       }
       chunks.push(chunk);
     });
-    req.on('end', () => resolve(Buffer.concat(chunks, length)));
+    req.on('end', () => resolve(chunks.length === 1 ? (chunks[0] as Buffer) : Buffer.concat(chunks, length)));
     req.on('error', reject);
   });
 }
@@ -401,10 +401,14 @@ function infoRefsV2Upload(): Buffer {
   ]);
 }
 
+/** The v2 advertisement never changes (constant capabilities): build it once. */
+const INFO_REFS_V2_UPLOAD = infoRefsV2Upload();
+
 export function mountGit(store: GitStore, opts: MountGitOptions = {}): GitRequestHandler {
   const expectedToken = opts.token ?? process.env.MAKEFUN_SHOP_TOKEN ?? '';
-  // Pack cache: key -> pack bytes. Dropped for a repo whenever a push changes it.
-  const packCache = new Map<string, Buffer>();
+  // Pack cache: key -> {pack, shallow boundary, full v2 response}. Dropped for
+  // a repo whenever a push changes it.
+  const packCache = new Map<string, FetchPackEntry>();
   const dropPackCache = (repoKey: string): void => {
     for (const key of [...packCache.keys()]) {
       if (key.startsWith(`${repoKey}|`)) packCache.delete(key);
@@ -412,6 +416,16 @@ export function mountGit(store: GitStore, opts: MountGitOptions = {}): GitReques
     if (packCache.size > 128) {
       for (const key of [...packCache.keys()].slice(0, packCache.size - 128)) packCache.delete(key);
     }
+  };
+  // Ref-dependent response cache: v0 advertisements + ls-refs answers, keyed
+  // by the repo's ref generation (store.refVersion). A push that moves a ref
+  // bumps the generation, so an entry can never outlive the refs it was
+  // built from; a refused push that moves no ref leaves the cache valid.
+  // Stale generations only accumulate as keys; the map is cleared past 256.
+  const refResponseCache = new Map<string, Buffer>();
+  const refResponsePut = (key: string, value: Buffer): void => {
+    if (refResponseCache.size > 256) refResponseCache.clear();
+    refResponseCache.set(key, value);
   };
 
   const authorized = (req: IncomingMessage): boolean => {
@@ -446,16 +460,22 @@ export function mountGit(store: GitStore, opts: MountGitOptions = {}): GitReques
       }
       const wantsV2 = service === 'git-upload-pack' && (req.headers['git-protocol'] ?? '').includes('version=2');
       if (wantsV2) {
-        sendBuffer(res, 200, 'application/x-git-upload-pack-advertisement', infoRefsV2Upload());
+        sendBuffer(res, 200, 'application/x-git-upload-pack-advertisement', INFO_REFS_V2_UPLOAD);
         return;
       }
-      const preamble = pktLine(`# service=${service}\n`);
-      const lines = v0RefLines(store, repoKey, service === 'git-upload-pack' ? UPLOAD_CAPS_V0 : RECEIVE_CAPS_V0);
+      const advKey = `${repoKey}|v0|${service}|${store.refVersion(repoKey)}`;
+      let adv = refResponseCache.get(advKey);
+      if (adv === undefined) {
+        const preamble = pktLine(`# service=${service}\n`);
+        const lines = v0RefLines(store, repoKey, service === 'git-upload-pack' ? UPLOAD_CAPS_V0 : RECEIVE_CAPS_V0);
+        adv = Buffer.concat([preamble, FLUSH, ...lines, FLUSH]);
+        refResponsePut(advKey, adv);
+      }
       const contentType =
         service === 'git-upload-pack'
           ? 'application/x-git-upload-pack-advertisement'
           : 'application/x-git-receive-pack-advertisement';
-      sendBuffer(res, 200, contentType, Buffer.concat([preamble, FLUSH, ...lines, FLUSH]));
+      sendBuffer(res, 200, contentType, adv);
       return;
     }
 
@@ -463,7 +483,7 @@ export function mountGit(store: GitStore, opts: MountGitOptions = {}): GitReques
       const body = await readBody(req);
       const wantsV2 = (req.headers['git-protocol'] ?? '').includes('version=2');
       try {
-        if (wantsV2) await handleUploadPackV2(store, repoKey, body, res, packCache);
+        if (wantsV2) await handleUploadPackV2(store, repoKey, body, res, packCache, refResponseCache, refResponsePut);
         else await handleUploadPackV0(store, repoKey, body, res, packCache);
       } catch (err) {
         if (!res.headersSent) sendJson(res, 400, { message: (err as Error).message });
@@ -528,7 +548,14 @@ function parseV2Args(lines: readonly string[]): { command: string; args: string[
   return { command: match[1], args: lines.slice(1) };
 }
 
-function handleLsRefsV2(store: GitStore, repoKey: string, args: readonly string[], res: ServerResponse): void {
+function handleLsRefsV2(
+  store: GitStore,
+  repoKey: string,
+  args: readonly string[],
+  res: ServerResponse,
+  refResponseCache: Map<string, Buffer>,
+  refResponsePut: (key: string, value: Buffer) => void,
+): void {
   const parsed: LsRefsArgs = { peel: false, symrefs: false, unborn: false, prefixes: [] };
   for (const raw of args) {
     const line = raw.replace(/\n$/, '');
@@ -537,6 +564,15 @@ function handleLsRefsV2(store: GitStore, repoKey: string, args: readonly string[
     else if (line === 'unborn') parsed.unborn = true;
     else if (line.startsWith('ref-prefix ')) parsed.prefixes.push(line.slice('ref-prefix '.length));
     // agent= / object-format= lines are acknowledged and ignored.
+  }
+  // The answer depends only on the refs and these flags: cache it against the
+  // repo's ref generation (a push that moves a ref changes the key).
+  const argsKey = `${parsed.peel ? 'p' : ''}${parsed.symrefs ? 's' : ''}${parsed.unborn ? 'u' : ''}|${parsed.prefixes.join(',')}`;
+  const cacheKey = `${repoKey}|ls-refs|${store.refVersion(repoKey)}|${argsKey}`;
+  const cached = refResponseCache.get(cacheKey);
+  if (cached !== undefined) {
+    sendBuffer(res, 200, 'application/x-git-upload-pack-result', cached);
+    return;
   }
   const { refs, mainOid } = repoRefs(store, repoKey);
   const keep = (name: string): boolean =>
@@ -558,7 +594,21 @@ function handleLsRefsV2(store: GitStore, repoKey: string, args: readonly string[
     }
     out.push(`${line}\n`);
   }
-  sendBuffer(res, 200, 'application/x-git-upload-pack-result', pktLines([...out, 'flush']));
+  const body = pktLines([...out, 'flush']);
+  refResponsePut(cacheKey, body);
+  sendBuffer(res, 200, 'application/x-git-upload-pack-result', body);
+}
+
+/**
+ * One cached fetch: the pack bytes, the shallow boundary (sorted), and the
+ * full v2 fetch response for the done/no-oldShallow shape, built lazily.
+ * The key (repo, wants, depth, haves, shallow) determines all three, so a
+ * hit answers without any reachability walk or response assembly.
+ */
+interface FetchPackEntry {
+  readonly pack: Buffer;
+  readonly boundary: string[];
+  response: Buffer | null;
 }
 
 /** Build (or reuse from cache) the pack for one fetch's object selection. */
@@ -566,9 +616,10 @@ function buildFetchPack(
   store: GitStore,
   repoKey: string,
   selection: ReadonlySet<string>,
+  boundary: ReadonlySet<string>,
   cacheKey: string,
-  packCache: Map<string, Buffer>,
-): Buffer {
+  packCache: Map<string, FetchPackEntry>,
+): FetchPackEntry {
   const cached = packCache.get(cacheKey);
   if (cached) return cached;
   const objects: Array<GitObject & { oid: string }> = [];
@@ -580,12 +631,34 @@ function buildFetchPack(
   const typeOrder: Record<GitObjectType, number> = { commit: 0, tree: 1, blob: 2, tag: 3 };
   objects.sort((a, b) => typeOrder[a.type] - typeOrder[b.type] || (a.oid < b.oid ? -1 : a.oid > b.oid ? 1 : 0));
   const pack = encodePack(objects);
-  packCache.set(cacheKey, pack);
+  const entry: FetchPackEntry = { pack, boundary: [...boundary].sort(), response: null };
+  packCache.set(cacheKey, entry);
   if (packCache.size > 128) {
     const first = packCache.keys().next().value;
     if (first !== undefined) packCache.delete(first);
   }
-  return pack;
+  return entry;
+}
+
+/**
+ * Append the shallow-info (when any) + packfile sections and the final FLUSH
+ * to a v2 fetch response. Shallow lines carry no trailing newline, like git's.
+ */
+function appendFetchTail(
+  parts: Buffer[],
+  pack: Buffer,
+  newShallow: readonly string[],
+  unshallow: readonly string[],
+): void {
+  if (newShallow.length || unshallow.length) {
+    parts.push(pktLine('shallow-info\n'));
+    for (const oid of newShallow) parts.push(pktLine(`shallow ${oid}`));
+    for (const oid of unshallow) parts.push(pktLine(`unshallow ${oid}`));
+    parts.push(DELIM);
+  }
+  parts.push(pktLine('packfile\n'));
+  parts.push(sidebandPackets(pack));
+  parts.push(FLUSH);
 }
 
 async function handleUploadPackV2(
@@ -593,13 +666,15 @@ async function handleUploadPackV2(
   repoKey: string,
   body: Buffer,
   res: ServerResponse,
-  packCache: Map<string, Buffer>,
+  packCache: Map<string, FetchPackEntry>,
+  refResponseCache: Map<string, Buffer>,
+  refResponsePut: (key: string, value: Buffer) => void,
 ): Promise<void> {
   const packets = decodeAllPktLines(body);
   const lines = dataLines(packets);
   const { command, args } = parseV2Args(lines);
   if (command === 'ls-refs') {
-    handleLsRefsV2(store, repoKey, args, res);
+    handleLsRefsV2(store, repoKey, args, res, refResponseCache, refResponsePut);
     return;
   }
   if (command !== 'fetch') throw new Error(`unsupported protocol v2 command ${command}`);
@@ -620,10 +695,6 @@ async function handleUploadPackV2(
   const wants = [...new Set(fetchArgs.wants)].filter((oid) => isObjectId(oid) && store.getObject(oid));
   const haves = fetchArgs.haves.filter((oid) => isObjectId(oid));
   const oldShallow = fetchArgs.shallow.filter((oid) => isObjectId(oid));
-  const clientHas = collectClosure(store, haves, { cutoffs: new Set(oldShallow) }).objects;
-  const wanted = collectClosure(store, wants, { depth: fetchArgs.depth });
-  const selection = new Set<string>();
-  for (const oid of wanted.objects) if (!clientHas.has(oid)) selection.add(oid);
   const cacheKey = [
     repoKey,
     wants.slice().sort().join(','),
@@ -631,14 +702,34 @@ async function handleUploadPackV2(
     haves.slice().sort().join(','),
     oldShallow.slice().sort().join(','),
   ].join('|');
-  const pack = buildFetchPack(store, repoKey, selection, cacheKey, packCache);
+  // Fast path: the pack and shallow boundary for these exact inputs are
+  // cached, and the client sent "done" with no shallow boundary of its own,
+  // so the whole response is determined by the cache entry — no reachability
+  // walk, no response assembly. (Without "done" the acknowledgments section
+  // needs the wanted set; with a client shallow boundary so does unshallow.)
+  const hit = packCache.get(cacheKey);
+  if (hit !== undefined && fetchArgs.done && oldShallow.length === 0) {
+    if (hit.response === null) {
+      const tail: Buffer[] = [];
+      appendFetchTail(tail, hit.pack, hit.boundary, []);
+      hit.response = Buffer.concat(tail);
+    }
+    sendBuffer(res, 200, 'application/x-git-upload-pack-result', hit.response);
+    return;
+  }
+  const clientHas = collectClosure(store, haves, { cutoffs: new Set(oldShallow) }).objects;
+  const wanted = collectClosure(store, wants, { depth: fetchArgs.depth });
+  const selection = new Set<string>();
+  for (const oid of wanted.objects) if (!clientHas.has(oid)) selection.add(oid);
+  const entry = buildFetchPack(store, repoKey, selection, wanted.boundary, cacheKey, packCache);
+  const pack = entry.pack;
 
   // Acknowledgments: ACK every have the server can reach from the wants, else
   // NAK. The section is only sent when the client did NOT send "done"
   // (multi-round negotiation): with "done" a real git server goes straight to
   // the packfile section, and a real git client rejects an "acknowledgments"
   // section there. Sections are separated by DELIM; only the whole response
-  // ends with FLUSH. Shallow lines carry no trailing newline, like git's.
+  // ends with FLUSH.
   const common = haves.filter((oid) => wanted.objects.has(oid));
   const parts: Buffer[] = [];
   if (!fetchArgs.done) {
@@ -653,16 +744,13 @@ async function handleUploadPackV2(
   }
   const newShallow = [...wanted.boundary].sort();
   const unshallow = oldShallow.filter((oid) => wanted.objects.has(oid) && !wanted.boundary.has(oid)).sort();
-  if (newShallow.length || unshallow.length) {
-    parts.push(pktLine('shallow-info\n'));
-    for (const oid of newShallow) parts.push(pktLine(`shallow ${oid}`));
-    for (const oid of unshallow) parts.push(pktLine(`unshallow ${oid}`));
-    parts.push(DELIM);
-  }
-  parts.push(pktLine('packfile\n'));
-  parts.push(sidebandPackets(pack));
-  parts.push(FLUSH);
-  sendBuffer(res, 200, 'application/x-git-upload-pack-result', Buffer.concat(parts));
+  appendFetchTail(parts, pack, newShallow, unshallow);
+  const response = Buffer.concat(parts);
+  // With "done" and no client shallow boundary this response has no
+  // acknowledgments section: it is fully determined by the cache entry, so
+  // later identical fetches can send it as-is (the fast path above).
+  if (fetchArgs.done && oldShallow.length === 0) entry.response = response;
+  sendBuffer(res, 200, 'application/x-git-upload-pack-result', response);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -674,7 +762,7 @@ async function handleUploadPackV0(
   repoKey: string,
   body: Buffer,
   res: ServerResponse,
-  packCache: Map<string, Buffer>,
+  packCache: Map<string, FetchPackEntry>,
 ): Promise<void> {
   const packets = decodeAllPktLines(body);
   const fetchArgs: FetchArgs = { wants: [], haves: [], shallow: [], depth: undefined, done: false };
@@ -710,7 +798,7 @@ async function handleUploadPackV0(
     haves.slice().sort().join(','),
     oldShallow.slice().sort().join(','),
   ].join('|');
-  const pack = buildFetchPack(store, repoKey, selection, cacheKey, packCache);
+  const pack = buildFetchPack(store, repoKey, selection, wanted.boundary, cacheKey, packCache).pack;
 
   const parts: Buffer[] = [];
   const common = haves.filter((oid) => wanted.objects.has(oid));
@@ -765,7 +853,7 @@ async function handleReceivePack(store: GitStore, repoKey: string, body: Buffer,
           return obj ? { type: obj.type as GitObjectType, data: obj.raw } : undefined;
         },
       });
-      for (const obj of decoded.objects.values()) store.putObject(obj.type as GitObjectType, obj.data);
+      for (const [oid, obj] of decoded.objects) store.putObjectKnown(oid, obj.type as GitObjectType, obj.data);
     } catch (err) {
       unpackOk = false;
       unpackDetail = (err as Error).message.slice(0, 200);

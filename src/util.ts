@@ -177,7 +177,9 @@ export function readBody(req: IncomingMessage, maxBytes: number = MAX_JSON_BODY_
     req.on('end', () => {
       if (done) return;
       done = true;
-      resolve(Buffer.concat(chunks));
+      // The common case (a small JSON body) arrives in one chunk: return it
+      // directly instead of copying it through Buffer.concat.
+      resolve(chunks.length === 1 ? (chunks[0] as Buffer) : Buffer.concat(chunks));
     });
     req.on('error', (err) => {
       if (done) return;

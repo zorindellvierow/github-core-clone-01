@@ -122,6 +122,12 @@ export interface Store {
   users: Map<string, User>;
   nextRepoId: number;
   nextUserId: number;
+  /**
+   * Per-repo ref generation, bumped by setRef/deleteRef: the git layer caches
+   * ref-dependent responses (advertisements, ls-refs) against it, so a cache
+   * entry can never outlive the refs it was built from.
+   */
+  refVersions: Map<string, number>;
 }
 
 export function createStore(): Store {
@@ -131,6 +137,7 @@ export function createStore(): Store {
     users: new Map(),
     nextRepoId: 1,
     nextUserId: 1,
+    refVersions: new Map(),
   };
 }
 
@@ -155,12 +162,19 @@ export interface GitStore {
   getObject(oid: string): GitObject | undefined;
   /** Store raw bytes as an object of `type`; returns its git oid (sha1 hex). */
   putObject(type: GitObjectType, raw: Buffer): string;
+  /**
+   * Store an object whose oid is already known (e.g. computed by a pack
+   * decoder), skipping the re-hash. Identical result to putObject.
+   */
+  putObjectKnown(oid: string, type: GitObjectType, raw: Buffer): void;
   /** The oid a ref points at in a repo, or undefined when the ref is absent. */
   getRef(repoKeyValue: string, ref: string): string | undefined;
   /** Point a ref at an oid (creates the ref; keeps Repo.branches in sync). */
   setRef(repoKeyValue: string, ref: string, oid: string): void;
   /** Remove a ref; returns false when the ref did not exist. */
   deleteRef(repoKeyValue: string, ref: string): boolean;
+  /** The repo's ref generation (0 when untouched); bumped by setRef/deleteRef. */
+  refVersion(repoKeyValue: string): number;
   /** All refs of a repo, optionally filtered to a prefix, sorted by refname. */
   listRefs(repoKeyValue: string, prefix?: string): Array<{ ref: string; oid: string }>;
 }
@@ -178,6 +192,12 @@ function syncBranch(repo: Repo, ref: string, oid: string | null): void {
   else repo.branches.set(branch, { sha: oid });
 }
 
+/** Bump a repo's ref generation (the git layer's cache key). */
+function bumpRefVersion(store: Store, repoKeyValue: string): void {
+  const key = repoKeyValue.toLowerCase();
+  store.refVersions.set(key, (store.refVersions.get(key) ?? 0) + 1);
+}
+
 /** A GitStore bound to one Store instance. */
 export function createGitStore(store: Store): GitStore {
   return {
@@ -192,6 +212,9 @@ export function createGitStore(store: Store): GitStore {
       store.gitObjects.set(oid, { type, raw });
       return oid;
     },
+    putObjectKnown(oid: string, type: GitObjectType, raw: Buffer): void {
+      store.gitObjects.set(oid.toLowerCase(), { type, raw });
+    },
     getRef(repoKeyValue: string, ref: string): string | undefined {
       return store.repos.get(repoKeyValue.toLowerCase())?.refs.get(ref);
     },
@@ -200,13 +223,20 @@ export function createGitStore(store: Store): GitStore {
       if (repo === undefined) return;
       repo.refs.set(ref, oid);
       syncBranch(repo, ref, oid);
+      bumpRefVersion(store, repoKeyValue);
     },
     deleteRef(repoKeyValue: string, ref: string): boolean {
       const repo = store.repos.get(repoKeyValue.toLowerCase());
       if (repo === undefined) return false;
       const existed = repo.refs.delete(ref);
-      if (existed) syncBranch(repo, ref, null);
+      if (existed) {
+        syncBranch(repo, ref, null);
+        bumpRefVersion(store, repoKeyValue);
+      }
       return existed;
+    },
+    refVersion(repoKeyValue: string): number {
+      return store.refVersions.get(repoKeyValue.toLowerCase()) ?? 0;
     },
     listRefs(repoKeyValue: string, prefix?: string): Array<{ ref: string; oid: string }> {
       const repo = store.repos.get(repoKeyValue.toLowerCase());

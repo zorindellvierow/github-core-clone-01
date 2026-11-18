@@ -33,6 +33,12 @@ export interface GitStore {
   /** Store an object, returning its SHA-1 id. Storing twice returns the same id. */
   putObject(type: GitObjectType, raw: Buffer): string;
 
+  /**
+   * Store an object whose id is already known (e.g. computed by a pack
+   * decoder), skipping the re-hash. Identical result to putObject.
+   */
+  putObjectKnown(oid: string, type: GitObjectType, raw: Buffer): void;
+
   /** The tip a ref points at, or undefined when the ref does not exist. */
   getRef(repoKey: string, ref: string): string | undefined;
 
@@ -41,6 +47,9 @@ export interface GitStore {
 
   /** Remove a ref; a no-op when the ref does not exist. */
   deleteRef(repoKey: string, ref: string): void;
+
+  /** The repo's ref generation (0 when untouched); bumped by setRef/deleteRef. */
+  refVersion(repoKey: string): number;
 
   /** Every ref of the repository, sorted by ref name; `prefix` filters by prefix. */
   listRefs(repoKey: string, prefix?: string): GitRef[];
