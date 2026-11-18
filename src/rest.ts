@@ -1046,6 +1046,15 @@ function authenticate(req: IncomingMessage, store: RestCtx['store']): string | n
   return VIEWER_LOGIN;
 }
 
+/**
+ * Minimal exported auth for later modules (M2+): the same viewer derivation
+ * as M1, so a token maps to the same login everywhere. Returns the viewer
+ * login, or null when the request carries no usable token.
+ */
+export function authViewer(req: IncomingMessage, store: import('./store.ts').Store): string | null {
+  return authenticate(req, store);
+}
+
 /** Namespaces later modules own; this handler returns false for them. */
 function isOtherModulePath(segments: readonly string[]): boolean {
   // /api/v3/repos/{owner}/{repo}/issues|labels|pulls[/...]

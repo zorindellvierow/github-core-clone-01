@@ -18,6 +18,8 @@
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { createGitStore, createStore, type Store } from './src/store.ts';
+import { mountIssues } from './src/issues.ts';
+import { mountPulls } from './src/pulls.ts';
 import { mountRest } from './src/rest.ts';
 import { dispatch, type RouteHandler, type RouterContext } from './src/router.ts';
 import { jsonError, sendJson } from './src/util.ts';
@@ -43,6 +45,10 @@ export function createAppWithStore(store: Store): Server {
   const mounts: RouteHandler[] = [
     // M1: REST v3 (repos, contents, branches, commits, git refs, auth).
     mountRest(ctx),
+    // M2: issues, labels, comments + pull requests (after REST: REST returns
+    // false for the issues/labels/pulls namespaces so these claim them).
+    mountIssues(ctx),
+    mountPulls(ctx),
   ];
 
   return createServer((req: IncomingMessage, res: ServerResponse) => {
