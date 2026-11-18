@@ -149,6 +149,8 @@ export function getRepo(store: Store, owner: string, name: string): Repo | undef
 // ---------------------------------------------------------------------------
 
 export interface GitStore {
+  /** True when the repository exists (created through the REST surface). */
+  hasRepo(repoKeyValue: string): boolean;
   /** The stored object for an oid, or undefined when absent. */
   getObject(oid: string): GitObject | undefined;
   /** Store raw bytes as an object of `type`; returns its git oid (sha1 hex). */
@@ -179,6 +181,9 @@ function syncBranch(repo: Repo, ref: string, oid: string | null): void {
 /** A GitStore bound to one Store instance. */
 export function createGitStore(store: Store): GitStore {
   return {
+    hasRepo(repoKeyValue: string): boolean {
+      return store.repos.has(repoKeyValue.toLowerCase());
+    },
     getObject(oid: string): GitObject | undefined {
       return store.gitObjects.get(oid.toLowerCase());
     },

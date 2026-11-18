@@ -18,6 +18,7 @@
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { createGitStore, createStore, type Store } from './src/store.ts';
+import { mountGit } from './src/git/routes.ts';
 import { mountGraphQL } from './src/graphql.ts';
 import { mountIssues } from './src/issues.ts';
 import { mountPulls } from './src/pulls.ts';
@@ -44,6 +45,9 @@ export function createAppWithStore(store: Store): Server {
   const ctx: RouterContext = { store, git: createGitStore(store) };
   void ctx;
   const mounts: RouteHandler[] = [
+    // M3: git smart HTTP (/{owner}/{repo}.git/...). First: no path overlap
+    // with /api/v3/*, and git must answer before the JSON 404 fallback.
+    mountGit(ctx.git),
     // M1: REST v3 (repos, contents, branches, commits, git refs, auth).
     mountRest(ctx),
     // M2: issues, labels, comments + pull requests (after REST: REST returns
