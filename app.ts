@@ -21,6 +21,7 @@ import { createGitStore, createStore, type Store } from './src/store.ts';
 import { mountGit } from './src/git/routes.ts';
 import { mountGraphQL } from './src/graphql.ts';
 import { mountIssues } from './src/issues.ts';
+import { mountMcp } from './src/mcp.ts';
 import { mountPulls } from './src/pulls.ts';
 import { mountRest } from './src/rest.ts';
 import { dispatch, type RouteHandler, type RouterContext } from './src/router.ts';
@@ -56,6 +57,8 @@ export function createAppWithStore(store: Store): Server {
     mountPulls(ctx),
     // M4: GraphQL v4 (after pulls: mutations write to the same Store).
     mountGraphQL(ctx),
+    // M5: MCP (after GraphQL: its tools read the same Store).
+    mountMcp(ctx),
   ];
 
   return createServer((req: IncomingMessage, res: ServerResponse) => {
