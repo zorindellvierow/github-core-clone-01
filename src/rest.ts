@@ -37,6 +37,8 @@ import {
   jsonError,
   newRequestId,
   parseJsonBody,
+  requestQuery,
+  requestSegments,
   sendJson,
 } from './util.ts';
 
@@ -173,28 +175,6 @@ function unprocessable(message: string): ApiError {
 
 function conflict(message: string): ApiError {
   return new ApiError(409, message);
-}
-
-/** Split a pathname into decoded segments, dropping empty pieces. */
-function splitPath(pathname: string): string[] {
-  const out: string[] = [];
-  for (const piece of pathname.split('/')) {
-    if (piece === '') continue;
-    try {
-      out.push(decodeURIComponent(piece));
-    } catch {
-      out.push(piece);
-    }
-  }
-  return out;
-}
-
-function queryOf(req: IncomingMessage): URLSearchParams {
-  try {
-    return new URL(req.url ?? '/', 'http://entry').searchParams;
-  } catch {
-    return new URLSearchParams();
-  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1070,7 +1050,7 @@ export function mountRest(ctx: RouterContext): RouteHandler {
   return async (req, res, pathname, method) => {
     if (!pathname.startsWith('/api/v3')) return false;
     if (pathname === '/api/v3' || pathname === '/api/v3/') return false;
-    const segments = splitPath(pathname);
+    const segments = requestSegments(req, pathname);
     // segments[0] === 'api', segments[1] === 'v3'
     const restSegments = segments.slice(2);
     if (isOtherModulePath(restSegments)) return false;
@@ -1081,7 +1061,7 @@ export function mountRest(ctx: RouterContext): RouteHandler {
       return true;
     }
 
-    const query = queryOf(req);
+    const query = requestQuery(req);
     try {
       // GET /api/v3/meta
       if (method === 'GET' && restSegments.length === 1 && restSegments[0] === 'meta') {

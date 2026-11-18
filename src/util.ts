@@ -39,6 +39,74 @@ export function newRequestId(): string {
   return high.toString(16).padStart(8, '0') + low.toString(16).padStart(8, '0');
 }
 
+// --- per-request parsed URL / path segments ---------------------------------
+//
+// app.ts and every module used to re-parse `req.url` (a WHATWG URL parse) and
+// re-split the pathname on every request — up to three URL parses and two
+// segment splits for one REST call. The URL and the pathname are fixed for a
+// request, so parse them once and cache the result on the request object
+// itself (a Symbol-keyed slot, gone with the request). Pure functions of the
+// request line: the cached values are byte-identical to a fresh parse.
+
+const URL_SLOT = Symbol('forge.requestUrl');
+const SEGMENTS_SLOT = Symbol('forge.requestSegments');
+const QUERY_SLOT = Symbol('forge.requestQuery');
+
+interface RequestSlots {
+  [URL_SLOT]?: URL;
+  [SEGMENTS_SLOT]?: { path: string; segments: string[] };
+  [QUERY_SLOT]?: URLSearchParams;
+}
+
+/** The request URL, parsed once per request (`/` when it does not parse). */
+export function requestUrl(req: IncomingMessage): URL {
+  const slots = req as unknown as RequestSlots;
+  const cached = slots[URL_SLOT];
+  if (cached !== undefined) return cached;
+  let url: URL;
+  try {
+    url = new URL(req.url ?? '/', 'http://entry');
+  } catch {
+    url = new URL('http://entry/');
+  }
+  slots[URL_SLOT] = url;
+  return url;
+}
+
+/** Split a pathname into decoded segments, dropping empty pieces. */
+export function splitPath(pathname: string): string[] {
+  const out: string[] = [];
+  for (const piece of pathname.split('/')) {
+    if (piece === '') continue;
+    try {
+      out.push(decodeURIComponent(piece));
+    } catch {
+      out.push(piece);
+    }
+  }
+  return out;
+}
+
+/** The request pathname's segments, split once per request. */
+export function requestSegments(req: IncomingMessage, pathname: string): string[] {
+  const slots = req as unknown as RequestSlots;
+  const cached = slots[SEGMENTS_SLOT];
+  if (cached !== undefined && cached.path === pathname) return cached.segments;
+  const segments = splitPath(pathname);
+  slots[SEGMENTS_SLOT] = { path: pathname, segments };
+  return segments;
+}
+
+/** The request's query parameters (empty when the URL has no query string). */
+export function requestQuery(req: IncomingMessage): URLSearchParams {
+  const slots = req as unknown as RequestSlots;
+  const cached = slots[QUERY_SLOT];
+  if (cached !== undefined) return cached;
+  const params = requestUrl(req).searchParams;
+  slots[QUERY_SLOT] = params;
+  return params;
+}
+
 // --- replies ----------------------------------------------------------------
 
 /**

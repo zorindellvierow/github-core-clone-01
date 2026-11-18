@@ -25,15 +25,11 @@ import { mountMcp } from './src/mcp.ts';
 import { mountPulls } from './src/pulls.ts';
 import { mountRest } from './src/rest.ts';
 import { dispatch, type RouteHandler, type RouterContext } from './src/router.ts';
-import { jsonError, sendJson } from './src/util.ts';
+import { jsonError, requestUrl, sendJson } from './src/util.ts';
 
 /** The path of a request URL, or '/' when it does not parse (never a throw from a request). */
 function pathOf(req: IncomingMessage): string {
-  try {
-    return new URL(req.url ?? '/', 'http://entry').pathname;
-  } catch {
-    return '/';
-  }
+  return requestUrl(req).pathname;
 }
 
 /**

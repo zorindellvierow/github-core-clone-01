@@ -30,6 +30,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { decodePack, encodePack, isObjectId, type GitObject } from './pack.ts';
 import type { GitObjectType, GitStore } from './store-iface.ts';
+import { requestUrl } from '../util.ts';
 
 export type { GitStore } from './store-iface.ts';
 
@@ -424,7 +425,7 @@ export function mountGit(store: GitStore, opts: MountGitOptions = {}): GitReques
 
   const handle = async (req: IncomingMessage, res: ServerResponse, owner: string, repo: string): Promise<void> => {
     const repoKey = `${owner}/${repo}`;
-    const url = new URL(req.url ?? '/', 'http://entry');
+    const url = requestUrl(req);
     const pathname = url.pathname;
     const method = req.method ?? 'GET';
 

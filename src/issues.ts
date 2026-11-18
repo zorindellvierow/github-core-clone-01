@@ -24,8 +24,15 @@ import {
   jsonError,
   newRequestId,
   parseJsonBody,
+  requestQuery,
+  requestSegments,
   sendJson,
 } from './util.ts';
+
+/** Split a pathname into decoded segments (re-exported for pulls.ts). */
+export { splitPath } from './util.ts';
+/** The request's query parameters (re-exported for pulls.ts). */
+export { requestQuery as queryOf } from './util.ts';
 
 // ---------------------------------------------------------------------------
 // Errors + small helpers (same contract as rest.ts)
@@ -55,28 +62,6 @@ export function unprocessable(message: string): ApiError {
 
 export function conflict(message: string): ApiError {
   return new ApiError(409, message);
-}
-
-/** Split a pathname into decoded segments, dropping empty pieces. */
-export function splitPath(pathname: string): string[] {
-  const out: string[] = [];
-  for (const piece of pathname.split('/')) {
-    if (piece === '') continue;
-    try {
-      out.push(decodeURIComponent(piece));
-    } catch {
-      out.push(piece);
-    }
-  }
-  return out;
-}
-
-export function queryOf(req: IncomingMessage): URLSearchParams {
-  try {
-    return new URL(req.url ?? '/', 'http://entry').searchParams;
-  } catch {
-    return new URLSearchParams();
-  }
 }
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
@@ -558,7 +543,7 @@ export function mountIssues(ctx: RouterContext): RouteHandler {
   const ictx: IssuesCtx = { store: ctx.store, git: ctx.git };
   return async (req, res, pathname, method) => {
     if (!pathname.startsWith('/api/v3/repos/')) return false;
-    const segments = splitPath(pathname);
+    const segments = requestSegments(req, pathname);
     // segments: api, v3, repos, {owner}, {repo}, {labels|issues}[, ...]
     if (segments.length < 6 || segments[2] !== 'repos') return false;
     const tail = segments.slice(5);
@@ -572,7 +557,7 @@ export function mountIssues(ctx: RouterContext): RouteHandler {
 
     const owner = segments[3] ?? '';
     const name = segments[4] ?? '';
-    const query = queryOf(req);
+    const query = requestQuery(req);
     try {
       const repo = requireRepo(ictx, owner, name, login);
 
