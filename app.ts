@@ -18,6 +18,7 @@
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { createGitStore, createStore, type Store } from './src/store.ts';
+import { mountRest } from './src/rest.ts';
 import { dispatch, type RouteHandler, type RouterContext } from './src/router.ts';
 import { jsonError, sendJson } from './src/util.ts';
 
@@ -40,7 +41,8 @@ export function createAppWithStore(store: Store): Server {
   const ctx: RouterContext = { store, git: createGitStore(store) };
   void ctx;
   const mounts: RouteHandler[] = [
-    // M0: no feature modules yet. M1+ append e.g. mountRest(ctx) here.
+    // M1: REST v3 (repos, contents, branches, commits, git refs, auth).
+    mountRest(ctx),
   ];
 
   return createServer((req: IncomingMessage, res: ServerResponse) => {
