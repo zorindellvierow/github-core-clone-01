@@ -736,7 +736,11 @@ async function patchRepoHandler(
 /** DELETE /api/v3/repos/{owner}/{repo} — 204, no body. */
 function deleteRepoHandler(ctx: RestCtx, res: ServerResponse, owner: string, name: string): void {
   requireRepo(ctx, owner, name);
-  ctx.store.repos.delete(repoKey(owner, name));
+  const key = repoKey(owner, name);
+  ctx.store.repos.delete(key);
+  // A recreated repo under the same name must not inherit the deleted repo's
+  // ref generation: the git layer caches advertisements/ls-refs against it.
+  ctx.store.refVersions.delete(key);
   res.writeHead(204, { 'x-github-request-id': newRequestId() });
   res.end();
 }

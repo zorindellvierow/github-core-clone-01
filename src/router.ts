@@ -46,6 +46,8 @@ export type MountFn = (ctx: RouterContext) => RouteHandler;
 /**
  * Run mounted handlers in order; returns true when one claimed the request.
  * The first handler returning true wins; later handlers are not called.
+ * A handler that answers synchronously (a plain boolean) is not awaited:
+ * awaiting a non-promise still costs a microtask hop per handler.
  */
 export async function dispatch(
   handlers: readonly RouteHandler[],
@@ -55,7 +57,8 @@ export async function dispatch(
   method: string,
 ): Promise<boolean> {
   for (const handler of handlers) {
-    if (await handler(req, res, pathname, method)) return true;
+    const result = handler(req, res, pathname, method);
+    if (result instanceof Promise ? await result : result) return true;
   }
   return false;
 }

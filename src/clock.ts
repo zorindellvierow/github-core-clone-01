@@ -28,9 +28,24 @@ export function nowMs(): number {
   return value;
 }
 
+// The ISO prefix of the current second ("2026-11-18T12:00:00."), rebuilt only
+// when the second changes: toISOString() is the slowest part of stamping a
+// record, and the date/time fields are constant within a second, so the
+// millisecond digits are the only part that moves. Output is byte-identical
+// to new Date(ms).toISOString() (the prefix is sliced from a real
+// toISOString() of that second, and the fraction is always 3 digits).
+let cachedSecond = -1;
+let cachedPrefix = '';
+
 /** ISO-8601 UTC timestamp for the next deterministic millisecond. */
 export function nowIso(): string {
-  return new Date(nowMs()).toISOString();
+  const ms = nowMs();
+  const second = Math.floor(ms / 1000);
+  if (second !== cachedSecond) {
+    cachedSecond = second;
+    cachedPrefix = new Date(second * 1000).toISOString().slice(0, 19) + '.';
+  }
+  return `${cachedPrefix}${String(ms % 1000).padStart(3, '0')}Z`;
 }
 
 /** The boot millisecond (for tests only; does not advance the clock). */

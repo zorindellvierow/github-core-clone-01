@@ -78,6 +78,13 @@ export function splitPath(pathname: string): string[] {
   const out: string[] = [];
   for (const piece of pathname.split('/')) {
     if (piece === '') continue;
+    // A segment without '%' decodes to itself; skip the decode call (and its
+    // throw/catch) on the common path. Malformed escapes still go through
+    // decodeURIComponent and fall back to the raw piece, as before.
+    if (!piece.includes('%')) {
+      out.push(piece);
+      continue;
+    }
     try {
       out.push(decodeURIComponent(piece));
     } catch {
