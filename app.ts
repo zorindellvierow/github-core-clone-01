@@ -18,6 +18,7 @@
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { createGitStore, createStore, type Store } from './src/store.ts';
+import { mountGraphQL } from './src/graphql.ts';
 import { mountIssues } from './src/issues.ts';
 import { mountPulls } from './src/pulls.ts';
 import { mountRest } from './src/rest.ts';
@@ -49,6 +50,8 @@ export function createAppWithStore(store: Store): Server {
     // false for the issues/labels/pulls namespaces so these claim them).
     mountIssues(ctx),
     mountPulls(ctx),
+    // M4: GraphQL v4 (after pulls: mutations write to the same Store).
+    mountGraphQL(ctx),
   ];
 
   return createServer((req: IncomingMessage, res: ServerResponse) => {
